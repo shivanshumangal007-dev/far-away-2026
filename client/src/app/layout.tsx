@@ -13,8 +13,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Far Away Japan",
-  description: "Next.js 16 + Express + gRPC starter",
+  title: "Orbital AI — Autonomous Orbital Traffic Control",
+  description:
+    "AI-driven infrastructure that monitors, predicts, and manages orbital traffic in real time — preventing collisions and optimizing space lane efficiency.",
 };
 
 export default function RootLayout({
@@ -25,7 +26,7 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased dark`}
     >
       <body className="min-h-full flex flex-col">{children}</body>
     </html>
