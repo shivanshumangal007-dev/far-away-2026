@@ -1,428 +1,399 @@
 """
-local-stt  –  lightweight background speech-to-text
+local-stt  –  lightweight background speech-to-text (PyQt6 Edition)
 
 Ctrl+Shift+Space  →  start recording
-Ctrl+Shift+Space  →  stop  →  transcribe  →  clipboard  →  assistant API
-
-Runs silently in the system tray. Very low idle RAM (~40 MB without model).
-Uses faster-whisper (tiny model, ~75 MB) – no PyTorch required.
-
-Linked to Far Away backend: POST /api/assistant (see .env.example).
+Ctrl+Shift+Space  →  stop  →  transcribe  →  clipboard
 """
 
-import ctypes
 import math
-import os
 import platform
 import random
 import socket
 import sys
 import threading
-import tkinter as tk
-from typing import Optional, Callable
+import time
+from typing import Optional
 
-import customtkinter as ctk
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject
+from PyQt6.QtGui import QPainter, QColor, QFont, QIcon, QAction
+from PyQt6.QtWidgets import (
+    QApplication, QWidget, QVBoxLayout, QHBoxLayout,
+    QLabel, QTextEdit, QFrame, QSystemTrayIcon, QMenu
+)
 import numpy as np
 import pyperclip
+import soundcard as sc
 import sounddevice as sd
 from PIL import Image, ImageDraw
 from pynput import keyboard as pynput_kb
-import pystray
 from faster_whisper import WhisperModel
 
-from assistant_client import format_result_summary, is_enabled, send_transcript
+SYS = platform.system()
 
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass
-
-SYS = platform.system() 
-
-_BG      = "#0E0F0F"
-_BORDER  = "#2A2A2A"
-_TEXT    = "#E8DCC8"
-_SUBTEXT = "#8A8A8A"
-_ACCENT  = "#1BB9CE"
-_RED     = "#B87878"
-_GREEN   = "#7DA888"
-_CARD_W  = 640
-_CARD_H  = 78
+_BG       = "#0E0F0F"
+_BORDER   = "#2A2A2A"
+_TEXT     = "#E8DCC8"
+_SUBTEXT  = "#8A8A8A"
+_ACCENT   = "#1BB9CE"
+_RED      = "#B87878"
+_GREEN    = "#7DA888"
+_CARD_W   = 640
+_CARD_H   = 78
 _CARD_H_R = 290
 
-def _make_icon(size=64, color="#1BB9CE") -> Image.Image:
+
+def _make_qicon(size=64, color="#1BB9CE") -> QIcon:
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     s = size
-    # Mic body
     d.rounded_rectangle([s*.30, s*.04, s*.70, s*.58], radius=s*.18, fill=color)
-    # Arc (stand arm)
-    d.arc([s*.14, s*.36, s*.86, s*.76], start=0, end=180, fill=color,
-          width=max(3, int(s*.06)))
-    # Stem
+    d.arc([s*.14, s*.36, s*.86, s*.76], start=0, end=180, fill=color, width=max(3, int(s*.06)))
     cx = s // 2
     d.rectangle([cx - s*.04, s*.74, cx + s*.04, s*.88], fill=color)
     d.rectangle([s*.30, s*.86, s*.70, s*.94], fill=color)
-    return img
+    from PyQt6.QtGui import QPixmap
+    import io
+    buf = io.BytesIO()
+    img.save(buf, format='PNG')
+    px = QPixmap()
+    px.loadFromData(buf.getvalue())
+    return QIcon(px)
 
-def _apply_dwm(hwnd: int):
-    if SYS != "Windows":
-        return
-    try:
-        dwm = ctypes.windll.dwmapi
-        DWMWA_WINDOW_CORNER_PREFERENCE = 33
-        dwm.DwmSetWindowAttribute(
-            hwnd, DWMWA_WINDOW_CORNER_PREFERENCE,
-            ctypes.byref(ctypes.c_int(2)), ctypes.sizeof(ctypes.c_int),
+
+def _trunc(s: str, n: int) -> str:
+    return s if len(s) <= n else s[:n - 1] + "…"
+
+
+def _build_interval_table(chunks: list, record_start_time: float) -> tuple[np.ndarray, list]:
+    """
+    Given a list of (wall_clock_start_ts, audio_data) chunks, return:
+      - concatenated audio (float32, mono)
+      - interval table: list of (comp_start_s, comp_end_s, real_offset_s)
+        where real_offset_s = seconds since record_start_time
+
+    For mic: chunks are gapless so real_offset ≈ comp_start, but we still
+    build the table the same way for consistency.
+    For loopback: WASAPI drops silence so real_offset != comp_start.
+    In both cases Whisper's segment timestamps (in compressed audio time) get
+    remapped to wall-clock offsets via this table.
+    """
+    data_list = []
+    intervals = []
+    compressed_samples = 0
+
+    for ts, data in chunks:
+        if data.ndim > 1:
+            data = np.mean(data, axis=1)
+        data = data.flatten().astype(np.float32)
+
+        chunk_len = len(data)
+        chunk_dur = chunk_len / 16000.0
+        real_offset = ts - record_start_time   # ts is chunk START time
+        comp_start  = compressed_samples / 16000.0
+        comp_end    = comp_start + chunk_dur
+
+        intervals.append((comp_start, comp_end, real_offset))
+        data_list.append(data)
+        compressed_samples += chunk_len
+
+    audio = np.concatenate(data_list) if data_list else np.array([], dtype=np.float32)
+    return audio, intervals
+
+
+def _map_to_real(compressed_time: float, intervals: list) -> float:
+    """Map a compressed-audio timestamp to a wall-clock offset."""
+    for comp_start, comp_end, real_offset in intervals:
+        if comp_start <= compressed_time < comp_end:
+            return real_offset + (compressed_time - comp_start)
+    if intervals:
+        comp_start, _, real_offset = intervals[-1]
+        return real_offset + (compressed_time - comp_start)
+    return compressed_time
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+
+class AudioVisualizer(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(44, 36)
+        self.mode = "hidden"
+        self.rms = 0.0
+        self.phase = 0.0
+        self.color = QColor(_ACCENT)
+
+    def set_mode(self, mode: str, color: str):
+        self.mode = mode
+        self.color = QColor(color)
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(self.color)
+        if self.mode == "hidden":
+            return
+        for i in range(5):
+            x = 2 + i * 8
+            if self.mode == "listening":
+                rms_val = min(1.0, self.rms * 6.0)
+                p = max(0.0, min(1.0, rms_val + (i - 2) * 0.08 + random.uniform(-0.04, 0.04)))
+                h = int(6 + p * 26)
+            elif self.mode == "processing":
+                t = math.sin(self.phase + i * 0.8) * 0.5 + 0.5
+                h = int(6 + t * 18)
+            else:
+                h = 6
+            y = (36 - h) // 2
+            painter.drawRect(x, y, 5, h)
+
+
+class TranscriptionSignals(QObject):
+    result_ready = pyqtSignal(str, bool)
+
+
+class FloatingOverlay(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint |
+            Qt.WindowType.WindowStaysOnTopHint |
+            Qt.WindowType.Tool
         )
-        dwm.DwmSetWindowAttribute(
-            hwnd, 2,
-            ctypes.byref(ctypes.c_int(2)), ctypes.sizeof(ctypes.c_int),
-        )
-    except Exception:
-        pass
-
-class FloatingOverlay(ctk.CTkToplevel):
-    def __init__(self, master):
-        super().__init__(master)
-        self.overrideredirect(True)
-        self.wm_attributes("-topmost", True)
-        self.wm_attributes("-alpha", 0.0)
-        self.configure(fg_color=_BG)
-
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setWindowOpacity(0.0)
         self._state = "hidden"
-        self._rms = 0.0
-        self._dismiss_job = None
-        self._wave_job = None
-        self._pulse_job = None
-        self._fade_job = None
-        self._phase = 0.0
+        self._fade_target = 0.0
+        self.anim_timer = QTimer(self)
+        self.anim_timer.timeout.connect(self._tick_animation)
+        self.anim_timer.start(60)
+        self.fade_timer = QTimer(self)
+        self.fade_timer.timeout.connect(self._tick_fade)
+        self._build_ui()
+        self._position(_CARD_H)
 
-        self._build()
-        self.withdraw()
-        self.after(80, self._setup_platform)
-
-    def _build(self):
-        self.resizable(False, False)
-        outer = ctk.CTkFrame(self, fg_color=_BORDER, corner_radius=18)
-        outer.pack(fill="both", expand=True)
-        inner = ctk.CTkFrame(outer, fg_color=_BG, corner_radius=16)
-        inner.pack(fill="both", expand=True, padx=1, pady=1)
-
-        # Top row
-        row = ctk.CTkFrame(inner, fg_color="transparent")
-        row.pack(fill="x", padx=20, pady=(16, 12))
-        row.columnconfigure(1, weight=1)
-
-        self._icon_lbl = ctk.CTkLabel(row, text="✦",
-                                       font=ctk.CTkFont(size=22),
-                                       text_color=_ACCENT, width=30)
-        self._icon_lbl.grid(row=0, column=0, padx=(0, 14), sticky="w")
-
-        self._status_lbl = ctk.CTkLabel(row, text="",
-                                         font=ctk.CTkFont(family="Segoe UI", size=14),
-                                         text_color=_TEXT, anchor="w")
-        self._status_lbl.grid(row=0, column=1, sticky="w")
-
-        self._canvas = tk.Canvas(row, width=44, height=36,
-                                  bg=_BG, highlightthickness=0)
-        self._canvas.grid(row=0, column=2, padx=(14, 0), sticky="e")
-        self._bars = [
-            self._canvas.create_rectangle(2 + i * 8, 15, 7 + i * 8, 21,
-                                          fill=_ACCENT, outline="")
-            for i in range(5)
-        ]
-
-        self._res_frame = ctk.CTkFrame(inner, fg_color="transparent")
-
-        tk.Canvas(self._res_frame, height=1, bg=_BORDER,
-                  highlightthickness=0).pack(fill="x", padx=20, pady=(0, 10))
-
-        self._heard_lbl = ctk.CTkLabel(
-            self._res_frame, text="",
-            font=ctk.CTkFont(family="Segoe UI", size=11),
-            text_color=_SUBTEXT, anchor="w",
-            wraplength=_CARD_W - 60, justify="left",
-        )
-        self._heard_lbl.pack(anchor="w", padx=20, pady=(0, 6))
-
-        self._result_box = ctk.CTkTextbox(
-            self._res_frame, height=110,
-            fg_color="#161717", border_color=_BORDER, border_width=1,
-            corner_radius=10,
-            font=ctk.CTkFont(family="Segoe UI", size=13),
-            text_color=_TEXT, wrap="word",
-        )
-        self._result_box.pack(fill="x", padx=20, pady=(0, 8))
-        self._result_box.configure(state="disabled")
-
-        ctk.CTkLabel(
-            self._res_frame,
-            text="copied to clipboard  ·  Esc to close",
-            font=ctk.CTkFont(family="Segoe UI", size=10),
-            text_color=_SUBTEXT,
-        ).pack(anchor="e", padx=24, pady=(0, 10))
-
-        self.bind("<Escape>", lambda _: self.dismiss())
-
-    def _setup_platform(self):
-        self.update_idletasks()
-        if SYS == "Windows":
-            try:
-                hwnd = ctypes.windll.user32.GetParent(self.winfo_id())
-                _apply_dwm(hwnd)
-            except Exception:
-                pass
-        elif SYS == "Darwin":
-            # Keep on top of everything including full-screen spaces
-            try:
-                self.wm_attributes("-topmost", True)
-            except Exception:
-                pass
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.outer_frame = QFrame(self)
+        self.outer_frame.setStyleSheet(f"QFrame {{ background-color: {_BORDER}; border-radius: 18px; }}")
+        outer_layout = QVBoxLayout(self.outer_frame)
+        outer_layout.setContentsMargins(1, 1, 1, 1)
+        inner_frame = QFrame(self.outer_frame)
+        inner_frame.setStyleSheet(f"QFrame {{ background-color: {_BG}; border-radius: 17px; }}")
+        self.inner_layout = QVBoxLayout(inner_frame)
+        self.inner_layout.setContentsMargins(20, 16, 20, 16)
+        top_layout = QHBoxLayout()
+        self.icon_lbl = QLabel("✦", inner_frame)
+        self.icon_lbl.setFont(QFont("Segoe UI", 22))
+        self.icon_lbl.setStyleSheet(f"color: {_ACCENT};")
+        top_layout.addWidget(self.icon_lbl)
+        self.status_lbl = QLabel("", inner_frame)
+        self.status_lbl.setFont(QFont("Segoe UI", 11))
+        self.status_lbl.setStyleSheet(f"color: {_TEXT};")
+        top_layout.addWidget(self.status_lbl, stretch=1)
+        self.visualizer = AudioVisualizer(inner_frame)
+        top_layout.addWidget(self.visualizer)
+        self.inner_layout.addLayout(top_layout)
+        self.res_widget = QWidget(inner_frame)
+        res_layout = QVBoxLayout(self.res_widget)
+        res_layout.setContentsMargins(0, 10, 0, 0)
+        divider = QFrame(self.res_widget)
+        divider.setFrameShape(QFrame.Shape.HLine)
+        divider.setStyleSheet(f"background-color: {_BORDER}; max-height: 1px; border: none;")
+        res_layout.addWidget(divider)
+        self.heard_lbl = QLabel("", self.res_widget)
+        self.heard_lbl.setFont(QFont("Segoe UI", 9))
+        self.heard_lbl.setStyleSheet(f"color: {_SUBTEXT};")
+        self.heard_lbl.setWordWrap(True)
+        res_layout.addWidget(self.heard_lbl)
+        self.result_box = QTextEdit(self.res_widget)
+        self.result_box.setFixedHeight(110)
+        self.result_box.setReadOnly(True)
+        self.result_box.setStyleSheet(f"""
+            QTextEdit {{
+                background-color: #161717;
+                border: 1px solid {_BORDER};
+                border-radius: 10px;
+                color: {_TEXT};
+                font-family: 'Segoe UI';
+                font-size: 13px;
+                padding: 6px;
+            }}
+        """)
+        res_layout.addWidget(self.result_box)
+        footer_lbl = QLabel("copied to clipboard  ·  Esc to close", self.res_widget)
+        footer_lbl.setFont(QFont("Segoe UI", 8))
+        footer_lbl.setStyleSheet(f"color: {_SUBTEXT};")
+        footer_lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
+        res_layout.addWidget(footer_lbl)
+        self.inner_layout.addWidget(self.res_widget)
+        self.res_widget.hide()
+        outer_layout.addWidget(inner_frame)
+        layout.addWidget(self.outer_frame)
 
     def _position(self, h: int):
-        sw = self.winfo_screenwidth()
-        x = (sw - _CARD_W) // 2
-        self.geometry(f"{_CARD_W}x{h}+{x}+70")
+        screen = QApplication.primaryScreen().geometry()
+        x = (screen.width() - _CARD_W) // 2
+        self.setGeometry(x, 70, _CARD_W, h)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self.dismiss()
+        super().keyPressEvent(event)
 
     def set_rms(self, v: float):
-        self._rms = v
+        self.visualizer.rms = v
 
     def show_listening(self):
-        self.after(0, self._do_listening)
+        self._state = "listening"
+        self.res_widget.hide()
+        self._position(_CARD_H)
+        self.icon_lbl.setStyleSheet(f"color: {_RED};")
+        self.status_lbl.setText("Listening  ·  press again to stop")
+        self.status_lbl.setStyleSheet(f"color: {_TEXT};")
+        self.visualizer.set_mode("listening", _RED)
+        self.show()
+        self._fade_to(0.95)
 
     def show_processing(self):
-        self.after(0, self._do_processing)
+        self._state = "processing"
+        self.res_widget.hide()
+        self._position(_CARD_H)
+        self.icon_lbl.setStyleSheet(f"color: {_ACCENT};")
+        self.status_lbl.setText("Transcribing...")
+        self.status_lbl.setStyleSheet(f"color: {_SUBTEXT};")
+        self.visualizer.set_mode("processing", _ACCENT)
+        self.visualizer.phase = 0.0
+        self.show()
+        self._fade_to(0.95)
 
     def show_result(self, text: str, ok: bool = True):
-        self.after(0, lambda: self._do_result(text, ok))
-
-    def show_assistant_status(self, msg: str, ok: bool = True):
-        self.after(0, lambda: self._do_assistant_status(msg, ok))
-
-    def dismiss(self):
-        self.after(0, self._do_dismiss)
-
-    def _do_listening(self):
-        self._kill_jobs()
-        self._state = "listening"
-        self._res_frame.pack_forget()
-        self._position(_CARD_H)
-        self._icon_lbl.configure(text_color=_RED)
-        self._status_lbl.configure(text="Listening  ·  press again to stop", text_color=_TEXT)
-        self._bars_color(_RED)
-        self.deiconify()
-        self._fade_to(0.95)
-        self._wave_job = self.after(60, self._tick_wave)
-
-    def _do_processing(self):
-        self._kill_jobs()
-        self._state = "processing"
-        self._res_frame.pack_forget()
-        self._position(_CARD_H)
-        self._icon_lbl.configure(text_color=_ACCENT)
-        self._status_lbl.configure(text="Transcribing...", text_color=_SUBTEXT)
-        self._bars_color(_ACCENT)
-        self._phase = 0.0
-        self._pulse_job = self.after(60, self._tick_pulse)
-
-    def _do_result(self, text: str, ok: bool):
-        self._kill_jobs()
         self._state = "result"
         color = _GREEN if ok else _RED
-        self._icon_lbl.configure(text_color=color)
-        self._status_lbl.configure(
-            text="Done" if ok else "Nothing heard", text_color=color
-        )
-        self._bars_flat(_SUBTEXT)
-        self._heard_lbl.configure(
-            text=f'Heard: "{_trunc(text, 90)}"' if text else ""
-        )
-        self._result_box.configure(state="normal")
-        self._result_box.delete("1.0", "end")
-        self._result_box.insert("end", text)
-        self._result_box.configure(state="disabled")
-        self._res_frame.pack(fill="x")
+        self.icon_lbl.setStyleSheet(f"color: {color};")
+        self.status_lbl.setText("Done" if ok else "Nothing heard")
+        self.status_lbl.setStyleSheet(f"color: {color};")
+        self.visualizer.set_mode("flat", _SUBTEXT)
+        self.heard_lbl.setText('Heard: "Dialogue Script Generated"' if text else "")
+        self.result_box.setPlainText(text)
+        self.res_widget.show()
         self._position(_CARD_H_R)
-        self._dismiss_job = self.after(8000, self._do_dismiss)
 
-    def _do_assistant_status(self, msg: str, ok: bool):
-        if self._state != "result":
+    def dismiss(self):
+        if self._state == "hidden":
             return
-        color = _GREEN if ok else _RED
-        prefix = "Assistant" if ok else "Assistant error"
-        self._status_lbl.configure(text=f"{prefix} · {msg}", text_color=color)
-
-    def _do_dismiss(self):
-        self._kill_jobs()
         self._state = "hidden"
-        self._fade_to(0.0, on_done=self.withdraw)
+        self._fade_to(0.0)
 
-    def _tick_wave(self):
-        if self._state != "listening":
-            return
-        rms = min(1.0, self._rms * 6.0)
-        for i, bid in enumerate(self._bars):
-            p = max(0.0, min(1.0, rms + (i - 2) * 0.08 + random.uniform(-0.04, 0.04)))
-            h = int(6 + p * 26)
-            y = (36 - h) // 2
-            self._canvas.coords(bid, 2 + i * 8, y, 7 + i * 8, y + h)
-        self._wave_job = self.after(60, self._tick_wave)
+    def _fade_to(self, target: float):
+        self._fade_target = target
+        self.fade_timer.start(16)
 
-    def _tick_pulse(self):
-        if self._state != "processing":
-            return
-        self._phase += 0.15
-        for i, bid in enumerate(self._bars):
-            t = math.sin(self._phase + i * 0.8) * 0.5 + 0.5
-            h = int(6 + t * 18)
-            y = (36 - h) // 2
-            self._canvas.coords(bid, 2 + i * 8, y, 7 + i * 8, y + h)
-        self._pulse_job = self.after(60, self._tick_pulse)
-
-    def _fade_to(self, target: float, on_done: Optional[Callable] = None, step=0.09):
-        if self._fade_job:
-            self.after_cancel(self._fade_job)
-            self._fade_job = None
-        self._fade_step(target, on_done, step)
-
-    def _fade_step(self, target, on_done, step):
-        try:
-            cur = self.wm_attributes("-alpha")
-        except Exception:
-            return
-        diff = target - cur
+    def _tick_fade(self):
+        cur = self.windowOpacity()
+        diff = self._fade_target - cur
+        step = 0.09
         if abs(diff) < step:
-            self.wm_attributes("-alpha", target)
-            if on_done:
-                on_done()
-            return
-        self.wm_attributes("-alpha", cur + (step if diff > 0 else -step))
-        self._fade_job = self.after(16, lambda: self._fade_step(target, on_done, step))
+            self.setWindowOpacity(self._fade_target)
+            self.fade_timer.stop()
+            if self._fade_target == 0.0:
+                self.hide()
+        else:
+            self.setWindowOpacity(cur + (step if diff > 0 else -step))
 
-    def _bars_color(self, c):
-        for b in self._bars:
-            self._canvas.itemconfigure(b, fill=c)
+    def _tick_animation(self):
+        if self._state == "listening":
+            self.visualizer.update()
+        elif self._state == "processing":
+            self.visualizer.phase += 0.15
+            self.visualizer.update()
 
-    def _bars_flat(self, c):
-        self._bars_color(c)
-        for i, b in enumerate(self._bars):
-            self._canvas.coords(b, 2 + i * 8, 15, 7 + i * 8, 21)
 
-    def _kill_jobs(self):
-        for attr in ("_dismiss_job", "_wave_job", "_pulse_job", "_fade_job"):
-            j = getattr(self, attr, None)
-            if j:
-                try:
-                    self.after_cancel(j)
-                except Exception:
-                    pass
-            setattr(self, attr, None)
+# ──────────────────────────────────────────────────────────────────────────────
 
-class LocalSTT:
+class LocalSTT(QObject):
     _HOTKEY = {"ctrl", "shift", "space"}
 
     def __init__(self):
-        ctk.set_appearance_mode("dark")
-        self.root = ctk.CTk()
-        self.root.withdraw()
-        self.root.title("local-stt")
-        if SYS == "Windows":
-            # Hide from taskbar
-            self.root.wm_attributes("-toolwindow", True)
+        super().__init__()
+        self.overlay = FloatingOverlay()
 
-        self.overlay = FloatingOverlay(self.root)
-
-        # Audio state
         self._recording = False
-        self._stream: Optional[sd.InputStream] = None
-        self._audio_chunks: list[np.ndarray] = []
+        self._user_stream: Optional[sd.InputStream] = None
+        self._loopback_recorder = None
+        self._loopback_thread: Optional[threading.Thread] = None
+        self._loopback_stop = threading.Event()
+
+        self._user_chunks: list = []   # (wall_clock_chunk_start_ts, np.ndarray)
+        self._other_chunks: list = []  # (wall_clock_chunk_start_ts, np.ndarray)
         self._lock = threading.Lock()
 
-        # Model (loaded lazily in background)
         self._model: Optional[WhisperModel] = None
         self._model_ready = threading.Event()
 
-        # Assistant backend link
-        self._assistant_enabled = is_enabled()
+        self.signals = TranscriptionSignals()
+        self.signals.result_ready.connect(self._handle_result_ready)
 
-        # Hotkey tracker
         self._pressed: set[str] = set()
-        self._hotkey_fired = False  # debounce
+        self._hotkey_fired = False
 
-        # Build tray and start hotkey listener
-        self._tray = self._build_tray()
+        self._build_tray()
         self._start_hotkey_listener()
-
-        # Pre-load model so first use is instant
         threading.Thread(target=self._load_model, daemon=True).start()
 
+    def _get_loopback_device(self):
+        try:
+            spk = sc.default_speaker()
+            loopback = sc.get_microphone(id=str(spk.name), include_loopback=True)
+            print(f"[local-stt] loopback: {loopback.name}")
+            return loopback
+        except Exception as e:
+            print(f"[WARN] loopback unavailable: {e}")
+            return None
+
     def _load_model(self):
-        print("[local-stt] loading faster-whisper tiny model…")
-        # tiny model is ~75 MB, no PyTorch, runs on CPU efficiently
-        self._model = WhisperModel("tiny", device="cpu", compute_type="int8")
+        print("[local-stt] loading model…")
+        self._model = WhisperModel("small", device="cpu", compute_type="int8")
         self._model_ready.set()
         print("[local-stt] model ready")
         self._tray_update_tooltip("local-stt  ·  ready")
 
-    def _build_tray(self) -> pystray.Icon:
-        icon_img = _make_icon()
-        menu = pystray.Menu(
-            pystray.MenuItem("local-stt", None, enabled=False),
-            pystray.Menu.SEPARATOR,
-            pystray.MenuItem(
-                "Ctrl+Shift+Space to record", None, enabled=False
-            ),
-            pystray.MenuItem(
-                "Assistant link",
-                pystray.Menu(
-                    pystray.MenuItem(
-                        "Enabled",
-                        self._toggle_assistant,
-                        checked=lambda _: self._assistant_enabled,
-                    ),
-                ),
-            ),
-            pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Quit", self._quit),
-        )
-        icon = pystray.Icon("local-stt", icon_img, "local-stt  ·  loading…", menu)
-        icon.run_detached()   # runs in its own daemon thread – main thread stays free
-        return icon
+    def _build_tray(self):
+        self.tray = QSystemTrayIcon(_make_qicon(), self.overlay)
+        self.tray.setToolTip("local-stt  ·  loading…")
+        menu = QMenu()
+        a = QAction("local-stt", menu); a.setEnabled(False); menu.addAction(a)
+        menu.addSeparator()
+        b = QAction("Ctrl+Shift+Space to record", menu); b.setEnabled(False); menu.addAction(b)
+        menu.addSeparator()
+        q = QAction("Quit", menu); q.triggered.connect(self._quit); menu.addAction(q)
+        self.tray.setContextMenu(menu)
+        self.tray.show()
 
     def _tray_update_tooltip(self, msg: str):
-        try:
-            self._tray.title = msg
-        except Exception:
-            pass
+        self.tray.setToolTip(msg)
 
     def _start_hotkey_listener(self):
         def _tag(key):
-            if key in (pynput_kb.Key.ctrl_l, pynput_kb.Key.ctrl_r,
-                       pynput_kb.Key.ctrl):
-                return "ctrl"
-            if key in (pynput_kb.Key.shift, pynput_kb.Key.shift_l,
-                       pynput_kb.Key.shift_r):
-                return "shift"
-            if key == pynput_kb.Key.space:
-                return "space"
+            if key in (pynput_kb.Key.ctrl_l, pynput_kb.Key.ctrl_r, pynput_kb.Key.ctrl): return "ctrl"
+            if key in (pynput_kb.Key.shift, pynput_kb.Key.shift_l, pynput_kb.Key.shift_r): return "shift"
+            if key == pynput_kb.Key.space: return "space"
             return None
 
         def on_press(key):
             tag = _tag(key)
-            if tag:
-                self._pressed.add(tag)
+            if tag: self._pressed.add(tag)
             if self._pressed >= self._HOTKEY and not self._hotkey_fired:
                 self._hotkey_fired = True
-                self.root.after(0, self._toggle)
+                QTimer.singleShot(0, self._toggle)
 
         def on_release(key):
             tag = _tag(key)
             if tag:
                 self._pressed.discard(tag)
-                if tag == "space":
-                    self._hotkey_fired = False
+                if tag == "space": self._hotkey_fired = False
 
         listener = pynput_kb.Listener(on_press=on_press, on_release=on_release)
         listener.daemon = True
@@ -437,125 +408,210 @@ class LocalSTT:
 
     def _begin_recording(self):
         self._recording = True
-        self._audio_chunks = []
+        self._record_start_time = time.monotonic()
+        self._user_chunks = []
+        self._other_chunks = []
         self.overlay.show_listening()
         self._tray_update_tooltip("local-stt  ·  recording…")
 
-        def _cb(indata, frames, time_info, status):
+        # Mic callback: store chunk START time before the data arrives
+        # (time.monotonic() here is close enough; blocksize/16000 ≈ 64ms jitter max)
+        def _user_cb(indata, frames, time_info, status):
             if self._recording:
-                self._audio_chunks.append(indata.copy())
-            self.overlay.set_rms(
-                float(np.sqrt(np.mean(indata.astype(np.float32) ** 2)))
-            )
+                # Chunk start = now - chunk_duration
+                chunk_dur = frames / 16000.0
+                ts = time.monotonic() - chunk_dur
+                self._user_chunks.append((ts, indata.copy()))
+            self.overlay.set_rms(float(np.sqrt(np.mean(indata.astype(np.float32) ** 2))))
 
-        self._stream = sd.InputStream(
+        self._user_stream = sd.InputStream(
             samplerate=16000, channels=1, dtype=np.float32,
-            blocksize=1024, callback=_cb,
+            blocksize=1024, callback=_user_cb
         )
-        self._stream.start()
+        self._user_stream.start()
+
+        loopback_dev = self._get_loopback_device()
+        if loopback_dev is not None:
+            self._loopback_stop.clear()
+            try:
+                self._loopback_recorder = loopback_dev.recorder(samplerate=16000, channels=1)
+                self._loopback_recorder.__enter__()
+                self._loopback_thread = threading.Thread(
+                    target=self._loopback_capture_loop, daemon=True
+                )
+                self._loopback_thread.start()
+            except Exception as e:
+                print(f"[WARN] loopback start failed: {e}")
+                self._loopback_recorder = None
+        else:
+            print("[WARN] no loopback device")
+
+    def _loopback_capture_loop(self):
+        """
+        Record loopback in 1024-frame chunks.
+        ts stored = wall-clock time when the chunk STARTED.
+
+        WASAPI delivers buffered data in bursts (no silence gaps in the data).
+        When chunks arrive faster than real-time we advance ts synthetically
+        so it tracks the audio timeline instead of wall-clock burst time.
+        On first chunk or after silence we anchor to wall clock.
+        """
+        chunk_dur = 1024 / 16000.0
+        silence_threshold = chunk_dur * 3
+        last_ts = None
+
+        try:
+            while not self._loopback_stop.is_set():
+                data = self._loopback_recorder.record(numframes=1024)
+                now = time.monotonic()
+
+                if last_ts is not None and (now - last_ts) < silence_threshold:
+                    ts = last_ts + chunk_dur   # synthetic: preserve audio timeline
+                else:
+                    ts = now - chunk_dur       # anchor: real wall clock, chunk start
+
+                last_ts = ts
+
+                if self._recording:
+                    self._other_chunks.append((ts, data.copy()))
+
+        except Exception as e:
+            if not self._loopback_stop.is_set():
+                print(f"[WARN] loopback error: {e}")
 
     def _end_recording(self):
         self._recording = False
-        if self._stream:
-            self._stream.stop()
-            self._stream.close()
-            self._stream = None
 
-        chunks = self._audio_chunks[:]
-        self._audio_chunks = []
+        if self._user_stream:
+            self._user_stream.stop()
+            self._user_stream.close()
+            self._user_stream = None
+
+        self._loopback_stop.set()
+        if self._loopback_recorder:
+            try: self._loopback_recorder.__exit__(None, None, None)
+            except Exception: pass
+            self._loopback_recorder = None
+        if self._loopback_thread:
+            self._loopback_thread.join(timeout=2)
+            self._loopback_thread = None
+
+        user_snapshot  = self._user_chunks[:]
+        other_snapshot = self._other_chunks[:]
+        record_start   = self._record_start_time
+
+        self._user_chunks = []
+        self._other_chunks = []
         self.overlay.show_processing()
         self._tray_update_tooltip("local-stt  ·  transcribing…")
-        threading.Thread(target=self._transcribe, args=(chunks,), daemon=True).start()
+        threading.Thread(
+            target=self._transcribe,
+            args=(user_snapshot, other_snapshot, record_start),
+            daemon=True
+        ).start()
 
-    def _transcribe(self, chunks: list):
+    def _transcribe(self, user_chunks: list, other_chunks: list, record_start: float):
         try:
             if not self._model_ready.wait(timeout=30):
-                self._finish("Model not ready – try again", ok=False)
+                self.signals.result_ready.emit("Model not ready – try again", False)
                 return
 
-            if not chunks:
-                self._finish("", ok=False)
+            timeline_events = []
+
+            for speaker, chunks in (("user", user_chunks), ("other", other_chunks)):
+                if not chunks:
+                    continue
+
+                audio, intervals = _build_interval_table(chunks, record_start)
+
+                if len(audio) < 4800:
+                    continue
+
+                segments, _ = self._model.transcribe(
+                    audio,
+                    beam_size=1,
+                    vad_filter=True,
+                    vad_parameters=dict(min_silence_duration_ms=500),
+                    word_timestamps=True
+                )
+
+                # Word-level splitting: even when the VAD merges two
+                # utterances into one segment (e.g. mic picks up faint
+                # echo of the other speaker), the per-word timestamps
+                # still reveal the real gap.  We split on any gap ≥ 1.5s.
+                GAP_THRESHOLD = 1.5
+
+                for seg in segments:
+                    if not seg.words:
+                        # Fallback: no word data, use segment-level ts
+                        real_start = _map_to_real(seg.start, intervals)
+                        timeline_events.append({
+                            "start": real_start,
+                            "speaker": speaker,
+                            "text": seg.text.strip()
+                        })
+                        continue
+
+                    groups: list[list] = [[seg.words[0]]]
+                    for w in seg.words[1:]:
+                        if (w.start - groups[-1][-1].end) >= GAP_THRESHOLD:
+                            groups.append([w])
+                        else:
+                            groups[-1].append(w)
+
+                    for grp in groups:
+                        text = "".join(w.word for w in grp).strip()
+                        if text:
+                            real_start = _map_to_real(grp[0].start, intervals)
+                            timeline_events.append({
+                                "start": real_start,
+                                "speaker": speaker,
+                                "text": text
+                            })
+
+            if not timeline_events:
+                self.signals.result_ready.emit("", False)
                 return
 
-            audio = np.concatenate(chunks, axis=0).flatten().astype(np.float32)
+            timeline_events.sort(key=lambda e: e["start"])
 
-            # Need at least ~0.3 seconds of audio
-            if len(audio) < 4800:
-                self._finish("", ok=False)
-                return
-
-            segments, _ = self._model.transcribe(
-                audio, beam_size=1, language=None, vad_filter=True,
-            )
-            text = " ".join(s.text for s in segments).strip()
-            self._finish(text, ok=bool(text))
+            lines = [f'  "{e["speaker"]}" : "{e["text"]}"' for e in timeline_events]
+            output = "{\n" + ",\n".join(lines) + "\n}"
+            self.signals.result_ready.emit(output, True)
 
         except Exception as e:
-            print(f"[local-stt] transcription error: {e}")
-            self._finish(f"Error: {e}", ok=False)
+            import traceback; traceback.print_exc()
+            self.signals.result_ready.emit(f"Error: {e}", False)
 
-    def _toggle_assistant(self, icon=None, item=None):
-        self._assistant_enabled = not self._assistant_enabled
-        os.environ["ASSISTANT_ENABLED"] = "true" if self._assistant_enabled else "false"
-        state = "on" if self._assistant_enabled else "off"
-        print(f"[local-stt] assistant link {state}")
-        self._tray_update_tooltip(f"local-stt  ·  assistant {state}")
-
-    def _send_to_assistant(self, text: str):
-        try:
-            async_mode = os.environ.get("ASSISTANT_ASYNC", "false").lower() in ("1", "true", "yes")
-            self.overlay.show_assistant_status("contacting backend…", ok=True)
-            result = send_transcript(text, async_mode=async_mode)
-            summary = format_result_summary(result)
-            print(f"[local-stt] assistant: {summary}")
-            self.overlay.show_assistant_status(summary, ok=True)
-            self._tray_update_tooltip(f"local-stt  ·  {summary}")
-        except Exception as e:
-            print(f"[local-stt] assistant error: {e}")
-            self.overlay.show_assistant_status(str(e), ok=False)
-            self._tray_update_tooltip("local-stt  ·  assistant error")
-
-    def _finish(self, text: str, ok: bool):
+    def _handle_result_ready(self, text: str, ok: bool):
         if ok and text:
             pyperclip.copy(text)
-            print(f"[local-stt] copied: {text}")
-        self.root.after(0, lambda: self.overlay.show_result(text, ok))
-        if ok and text and self._assistant_enabled:
-            self._tray_update_tooltip("local-stt  ·  sending to assistant…")
-            threading.Thread(target=self._send_to_assistant, args=(text,), daemon=True).start()
-        else:
-            self._tray_update_tooltip("local-stt  ·  ready")
+            print(f"[local-stt] copied:\n{text}")
+        self.overlay.show_result(text, ok)
+        self._tray_update_tooltip("local-stt  ·  ready")
 
-    def _quit(self, icon=None, item=None):
-        print("[local-stt] quitting")
-        try:
-            self._tray.stop()
-        except Exception:
-            pass
-        self.root.after(0, self.root.quit)
+    def _quit(self):
+        self.tray.hide()
+        QApplication.quit()
 
-    def run(self):
-        print(f"[local-stt] running on {SYS}  ·  Ctrl+Shift+Space to record")
-        try:
-            self.root.mainloop()
-        except KeyboardInterrupt:
-            self._quit()
-
-def _trunc(s: str, n: int) -> str:
-    return s if len(s) <= n else s[:n - 1] + "…"
 
 def _acquire_instance_lock():
-    """Bind a local socket to ensure only one instance runs."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 0)
     try:
         sock.bind(("127.0.0.1", 47915))
-        return sock  # keep reference so it stays bound
+        return sock
     except OSError:
-        return None  # when already running
+        return None
+
 
 if __name__ == "__main__":
     _lock = _acquire_instance_lock()
     if _lock is None:
-        sys.exit(0)  # another instance is already running
-    LocalSTT().run()
+        sys.exit(0)
+
+    app = QApplication(sys.argv)
+    app.setQuitOnLastWindowClosed(False)
+    stt = LocalSTT()
+    print(f"[local-stt] running on {SYS}  ·  Ctrl+Shift+Space to record")
+    sys.exit(app.exec())
