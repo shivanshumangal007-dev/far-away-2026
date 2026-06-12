@@ -39,6 +39,59 @@ python app.py
 | `Ctrl+Shift+Space` again | Stop, transcribe, copy, send to assistant |
 | `Esc` | Dismiss overlay |
 
+## System Requirements
+
+- **Python 3.8+**
+- **ffmpeg** (required by faster-whisper for audio processing)
+- **Microphone access** (system will prompt for permissions on first run)
+- **Windows:** Windows 10 or later
+- **macOS:** macOS 10.13 or later with microphone/screen recording permissions enabled in System Preferences
+
+## User Transcripts
+
+When you record, local-stt captures and transcribes **two separate audio streams**:
+
+- **Mic (user):** Your voice
+- **Loopback (other):** System audio / other speakers
+
+The output is formatted as JSON-style dialogue with speaker labels:
+
+```json
+{
+  "user" : "what time is the meeting",
+  "other" : "the meeting is at 2pm",
+  "user" : "thanks"
+}
+```
+
+**Output behavior:**
+- Transcripts are **automatically copied to clipboard**
+- If assistant link is enabled, they're sent to your configured backend
+- Toggle assistant link from tray menu: **Assistant link → Enabled/Disabled**
+- Press **Esc** to dismiss the overlay and clear the transcript from display
+
+## Troubleshooting
+
+### No audio captured / "Nothing heard" message
+- Check microphone permissions (macOS requires explicit access)
+- Ensure microphone is not in use by another application
+- Try adjusting the microphone volume
+- Verify loopback device is available (`sc.get_microphone()` on macOS requires Soundflower or BlackHole)
+
+### Transcription takes too long
+- The first run downloads the Whisper model (~1.5GB) — subsequent runs are faster
+- Model is cached locally in the venv; this only happens once
+
+### Assistant backend not responding
+- Verify backend is running: `cd ../backend && npm run dev`
+- Check `ASSISTANT_API_URL` in `.env` matches your backend URL
+- Check network connectivity between local-stt and backend
+
+### Accessibility/Permission issues on macOS
+- Grant **Microphone** access: System Settings → Privacy & Security → Microphone
+- Grant **Screen Recording** permission if recording system audio: System Settings → Privacy & Security → Screen Recording
+- For loopback recording, install [BlackHole](https://existential.audio/blackhole/) or similar virtual audio device
+
 ## Build
 
 **Windows:** `build_windows.bat` → `dist\local-stt.exe`
