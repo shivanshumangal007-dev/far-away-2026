@@ -28,6 +28,8 @@ from PIL import Image, ImageDraw
 from pynput import keyboard as pynput_kb
 from faster_whisper import WhisperModel
 
+import assistant_client
+
 SYS = platform.system()
 
 _BG       = "#0E0F0F"
@@ -587,6 +589,17 @@ class LocalSTT(QObject):
         if ok and text:
             pyperclip.copy(text)
             print(f"[local-stt] copied:\n{text}")
+
+            if assistant_client.is_enabled():
+                def _send():
+                    try:
+                        print("[local-stt] sending to backend...")
+                        res = assistant_client.send_transcript(text, async_mode=True)
+                        print(f"[local-stt] backend response: {assistant_client.format_result_summary(res)}")
+                    except Exception as e:
+                        print(f"[local-stt] backend error: {e}")
+                threading.Thread(target=_send, daemon=True).start()
+
         self.overlay.show_result(text, ok)
         self._tray_update_tooltip("local-stt  ·  ready")
 

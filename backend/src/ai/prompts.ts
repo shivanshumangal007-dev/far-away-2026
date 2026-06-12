@@ -85,7 +85,20 @@ const TOOL_CATALOG = [
   },
 ] as const;
 
-export const PLANNER_SYSTEM_PROMPT = `You are a tool planner for a voice assistant. Convert the user's natural language request into a sequence of tool calls.
+export function buildPlannerSystemPrompt(): string {
+  const now = new Date();
+  const isoNow = now.toISOString();
+  const tzOffset = -now.getTimezoneOffset();
+  const tzHours = Math.floor(Math.abs(tzOffset) / 60).toString().padStart(2, "0");
+  const tzMins = (Math.abs(tzOffset) % 60).toString().padStart(2, "0");
+  const tzSign = tzOffset >= 0 ? "+" : "-";
+  const tzString = `UTC${tzSign}${tzHours}:${tzMins}`;
+
+  return `You are a tool planner for a voice assistant. Convert the user's natural language request into a sequence of tool calls.
+
+CURRENT DATE/TIME: ${isoNow} (${tzString})
+Use this to resolve relative dates like "today", "tomorrow", "next week", etc.
+Always generate ISO datetime strings for calendar events based on this current time.
 
 RULES:
 1. Output ONLY valid JSON matching the schema — no markdown, no explanation.
@@ -112,6 +125,7 @@ OUTPUT SCHEMA:
 }
 
 Valid tool names: ${toolNameSchema.options.join(", ")}`;
+}
 
 export const PLANNER_EXAMPLES = [
   {
@@ -140,8 +154,8 @@ export const PLANNER_EXAMPLES = [
           tool: "calendar.create_event",
           params: {
             title: "Meeting with Hackathon Winner",
-            start: "2024-12-05T14:00:00Z",
-            end: "2024-12-05T15:00:00Z",
+            start: "<tomorrow_at_14:00_ISO>",
+            end: "<tomorrow_at_15:00_ISO>",
             meetLinkFromPreviousStep: true,
             emailFromPreviousStep: true,
           },
@@ -152,5 +166,6 @@ export const PLANNER_EXAMPLES = [
 ] as const;
 
 export function buildPlannerUserPrompt(transcript: string): string {
-  return `User request:\n"${transcript}"\n\nReturn the JSON plan.`;
+  const now = new Date().toISOString();
+  return `Current time: ${now}\n\nUser request:\n"${transcript}"\n\nReturn the JSON plan.`;
 }

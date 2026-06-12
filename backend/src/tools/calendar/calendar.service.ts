@@ -37,22 +37,24 @@ export async function createEvent(params: {
     start: { dateTime: params.start, timeZone: tz },
     end: { dateTime: params.end, timeZone: tz },
     attendees: params.attendees?.map((email) => ({ email })),
-    conferenceData: params.meetLink
-      ? undefined
-      : {
-          createRequest: {
-            requestId: `meet-${Date.now()}`,
-            conferenceSolutionKey: { type: "hangoutsMeet" },
-          },
-        },
-    location: params.meetLink,
+    // conferenceData: params.meetLink
+    //   ? undefined
+    //   : {
+    //       createRequest: {
+    //         requestId: `meet-${Date.now()}`,
+    //         conferenceSolutionKey: { type: "hangoutsMeet" },
+    //       },
+    //     },
+    // location: params.meetLink,
+    conferenceData: undefined
   };
 
   let response;
   try {
     response = await calendar.events.insert({
       calendarId: calendarId(params.calendarId),
-      conferenceDataVersion: params.meetLink ? 0 : 1,
+      // conferenceDataVersion: params.meetLink ? 0 : 1,
+      conferenceDataVersion: 0,
       requestBody,
     });
   } catch (err: any) {
@@ -62,7 +64,8 @@ export async function createEvent(params: {
       delete requestBody.attendees;
       response = await calendar.events.insert({
         calendarId: calendarId(params.calendarId),
-        conferenceDataVersion: params.meetLink ? 0 : 1,
+        // conferenceDataVersion: params.meetLink ? 0 : 1,
+        conferenceDataVersion:0,
         requestBody,
       });
     } else {

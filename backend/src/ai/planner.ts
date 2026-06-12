@@ -3,8 +3,8 @@ import { env } from "../config/env.js";
 import { PlannerError } from "../utils/errors.js";
 import {
   buildPlannerUserPrompt,
+  buildPlannerSystemPrompt,
   PLANNER_EXAMPLES,
-  PLANNER_SYSTEM_PROMPT,
 } from "./prompts.js";
 import { executionPlanSchema, type ExecutionPlanInput } from "./schemas.js";
 
@@ -21,7 +21,7 @@ export async function createPlan(transcript: string): Promise<ExecutionPlanInput
     temperature: 0,
     response_format: { type: "json_object" },
     messages: [
-      { role: "system", content: PLANNER_SYSTEM_PROMPT },
+      { role: "system", content: buildPlannerSystemPrompt() },
       ...PLANNER_EXAMPLES.flatMap((ex) => [
         { role: "user" as const, content: ex.input },
         { role: "assistant" as const, content: JSON.stringify(ex.output) },
