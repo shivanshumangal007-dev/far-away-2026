@@ -9,7 +9,6 @@
   <img src="https://img.shields.io/badge/Clerk-Auth-4f46e5?style=for-the-badge" alt="Clerk" />
 </p>
 
-
 <p align="center">
 <img width="900" height="870" alt="image" src="https://github.com/user-attachments/assets/1576a990-6365-47a2-9373-52faeb018990" />
 </p>
@@ -20,30 +19,36 @@ It captures intent from voice or text, executes actions across connected apps, a
 <table>
 <tr>
 <td align="center" width="33%">
+  
+<img src="https://github.com/user-attachments/assets/f5b48199-021e-4575-853f-e8be5ffd1dd0" width="260">
 
-https://github.com/user-attachments/assets/d2b9e033-b714-431e-a1ed-4fe9cbb6333a
+<br><br>
 
-### Clawvio captures context, not just notes.
+<b>Clawvio captures context, not just notes.</b>
+
+
 
 From client calls to internal standups, Clawvio turns raw conversation into clear, usable context.
 
 </td>
 
 <td align="center" width="33%">
+<img src="https://github.com/user-attachments/assets/eb5d6b12-60df-45c2-8f63-17d7a54f162a" width="260">
 
-https://github.com/user-attachments/assets/9a70e9aa-8092-4c88-aaa1-595b338c360c
+<br><br>
 
-### Every conversation becomes clear next steps.
+<b>Every conversation becomes clear next steps.</b>
 
 Clawvio extracts owners, deadlines, and priorities so your team always knows what to do next.
 
 </td>
 
 <td align="center" width="33%">
+<img src="https://github.com/user-attachments/assets/52aada5b-eaf0-4f51-98bc-984ecade1c25" width="260">
 
-https://github.com/user-attachments/assets/4095f4e0-e550-4707-b2d7-1c8942711866
+<br><br>
 
-### Move from insights to execution faster.
+<b>Move from insights to execution faster.</b>
 
 Clawvio connects ideas to real workflows so decisions turn into shipped outcomes, not forgotten threads.
 
