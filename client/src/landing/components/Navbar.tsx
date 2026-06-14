@@ -5,7 +5,7 @@ import Link from "next/link";
 const Navbar = () => {
   const downloadUrl =
     process.env.NEXT_PUBLIC_WINDOWS_DOWNLOAD_URL ??
-    "https://downloads.clawvio.ai/windows/ClawvioSetup-latest.exe";
+    "https://drive.google.com/file/d/1BcaIjx_D0GwYCAapa8QqiVdGHrqKqItD/view?usp=sharing";
 
   return (
     <motion.nav
