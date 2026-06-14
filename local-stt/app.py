@@ -153,6 +153,8 @@ class AudioVisualizer(QWidget):
 
 class TranscriptionSignals(QObject):
     result_ready = pyqtSignal(str, bool)
+    assistant_ready = pyqtSignal(str, bool)
+    assistant_toast = pyqtSignal(str, str, bool)
 
 
 class FloatingOverlay(QWidget):
@@ -283,6 +285,20 @@ class FloatingOverlay(QWidget):
         self.res_widget.show()
         self._position(_CARD_H_R)
 
+    def show_assistant_toast(self, title: str, message: str, ok: bool = True):
+        self._state = "result"
+        color = _GREEN if ok else _RED
+        self.icon_lbl.setStyleSheet(f"color: {color};")
+        self.status_lbl.setText(title)
+        self.status_lbl.setStyleSheet(f"color: {color};")
+        self.visualizer.set_mode("flat", _SUBTEXT)
+        self.heard_lbl.setText("Clawvio assistant")
+        self.result_box.setPlainText(message)
+        self.res_widget.show()
+        self._position(_CARD_H_R)
+        self.show()
+        self._fade_to(0.95)
+
     def dismiss(self):
         if self._state == "hidden":
             return
@@ -337,6 +353,8 @@ class LocalSTT(QObject):
 
         self.signals = TranscriptionSignals()
         self.signals.result_ready.connect(self._handle_result_ready)
+        self.signals.assistant_ready.connect(self._handle_assistant_ready)
+        self.signals.assistant_toast.connect(self._handle_assistant_toast)
 
         self._pressed: set[str] = set()
         self._hotkey_fired = False
@@ -344,6 +362,8 @@ class LocalSTT(QObject):
         self._build_tray()
         self._start_hotkey_listener()
         threading.Thread(target=self._load_model, daemon=True).start()
+        if assistant_client.is_enabled() and not assistant_client.saved_desktop_token():
+            threading.Thread(target=self._pair_assistant, daemon=True).start()
 
     def _get_loopback_device(self):
         try:
@@ -370,12 +390,39 @@ class LocalSTT(QObject):
         menu.addSeparator()
         b = QAction("Ctrl+Shift+Space to record", menu); b.setEnabled(False); menu.addAction(b)
         menu.addSeparator()
+        connect = QAction("Connect Clawvio", menu); connect.triggered.connect(self._connect_assistant); menu.addAction(connect)
+        logout = QAction("Disconnect Clawvio", menu); logout.triggered.connect(self._logout_assistant); menu.addAction(logout)
+        menu.addSeparator()
         q = QAction("Quit", menu); q.triggered.connect(self._quit); menu.addAction(q)
         self.tray.setContextMenu(menu)
         self.tray.show()
 
     def _tray_update_tooltip(self, msg: str):
         self.tray.setToolTip(msg)
+
+    def _pair_assistant(self):
+        try:
+            self.signals.assistant_ready.emit("Opening browser to connect Clawvio desktop.", True)
+            assistant_client.ensure_paired()
+            self.signals.assistant_ready.emit("Clawvio desktop connected.", True)
+        except Exception as e:
+            print(f"[local-stt] desktop pairing error: {e}")
+            self.signals.assistant_ready.emit(f"Desktop pairing failed: {e}", False)
+
+    def _connect_assistant(self):
+        threading.Thread(target=self._pair_assistant, daemon=True).start()
+
+    def _logout_assistant(self):
+        def _run():
+            try:
+                assistant_client.logout()
+                self.signals.assistant_ready.emit("Clawvio desktop disconnected.", True)
+                self._tray_update_tooltip("local-stt  Â·  disconnected")
+            except Exception as e:
+                print(f"[local-stt] logout error: {e}")
+                self.signals.assistant_ready.emit(f"Logout failed: {e}", False)
+
+        threading.Thread(target=_run, daemon=True).start()
 
     def _start_hotkey_listener(self):
         def _tag(key):
@@ -587,6 +634,7 @@ class LocalSTT(QObject):
 
     def _handle_result_ready(self, text: str, ok: bool):
         if ok and text:
+            text = assistant_client.normalize_spoken_email(text)
             pyperclip.copy(text)
             print(f"[local-stt] copied:\n{text}")
 
@@ -596,12 +644,39 @@ class LocalSTT(QObject):
                         print("[local-stt] sending to backend...")
                         res = assistant_client.send_transcript(text, async_mode=True)
                         print(f"[local-stt] backend response: {assistant_client.format_result_summary(res)}")
+                        request_id = res.get("requestId")
+                        self.signals.assistant_toast.emit(
+                            "Clawvio is working",
+                            "Your request is queued. I’ll update this bar when it finishes.",
+                            True,
+                        )
+                        if request_id:
+                            final = assistant_client.wait_for_completion(request_id)
+                            run = final.get("run") or {}
+                            request = final.get("request") or {}
+                            finished = request.get("status") == "completed"
+                            ok_final = finished and run.get("success") is not False
+                            title, msg = assistant_client.format_completion_toast(final)
+                            self.signals.assistant_toast.emit(title, msg, ok_final)
                     except Exception as e:
                         print(f"[local-stt] backend error: {e}")
+                        self.signals.assistant_toast.emit("Clawvio error", str(e), False)
                 threading.Thread(target=_send, daemon=True).start()
 
         self.overlay.show_result(text, ok)
         self._tray_update_tooltip("local-stt  ·  ready")
+
+    def _handle_assistant_ready(self, message: str, ok: bool):
+        icon = (
+            QSystemTrayIcon.MessageIcon.Information
+            if ok
+            else QSystemTrayIcon.MessageIcon.Warning
+        )
+        title = "Clawvio assistant" if ok else "Clawvio assistant failed"
+        self.tray.showMessage(title, message, icon, 6000)
+
+    def _handle_assistant_toast(self, title: str, message: str, ok: bool):
+        self.overlay.show_assistant_toast(title, message, ok)
 
     def _quit(self):
         self.tray.hide()

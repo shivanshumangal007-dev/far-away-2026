@@ -23,6 +23,13 @@ export interface ExecutionPlan {
 export interface ExecutionContext {
   previousResults: Record<string, unknown>;
   variables: Record<string, unknown>;
+  user?: {
+    clerkUserId?: string;
+  };
+  request?: {
+    id?: string;
+    source?: "api" | "voice" | "local-stt" | "web";
+  };
   executionState: {
     currentStep: number;
     totalSteps: number;
@@ -61,5 +68,6 @@ export interface AssistantResponseBody {
 export interface VoiceRequestEventData {
   transcript: string;
   requestId?: string;
-  source?: "api" | "voice" | "local-stt";
+  clerkUserId?: string;
+  source?: "api" | "voice" | "local-stt" | "web";
 }

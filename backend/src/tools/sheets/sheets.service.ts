@@ -15,8 +15,9 @@ export async function searchSheet(
   sheetName: string,
   query: string,
   spreadsheetIdOverride?: string,
+  clerkUserId?: string,
 ): Promise<SheetRowResult[]> {
-  if (env.GOOGLE_MOCK_MODE || !isGoogleConfigured()) {
+  if (env.GOOGLE_MOCK_MODE || (!clerkUserId && !isGoogleConfigured())) {
     return [
       {
         sheetName,
@@ -28,7 +29,8 @@ export async function searchSheet(
   }
 
   const id = spreadsheetId(spreadsheetIdOverride);
-  const { sheets } = await getGoogleClients();
+  const { sheets, auth } = await getGoogleClients(clerkUserId);
+  if (!auth) return [];
 
   const response = await sheets.spreadsheets.values.get({
     spreadsheetId: id,
@@ -57,8 +59,9 @@ export async function searchSheet(
 export async function getLastRow(
   sheetName: string,
   spreadsheetIdOverride?: string,
+  clerkUserId?: string,
 ): Promise<SheetRowResult> {
-  if (env.GOOGLE_MOCK_MODE || !isGoogleConfigured()) {
+  if (env.GOOGLE_MOCK_MODE || (!clerkUserId && !isGoogleConfigured())) {
     return {
       sheetName,
       rowNumber: 42,
@@ -68,7 +71,14 @@ export async function getLastRow(
   }
 
   const id = spreadsheetId(spreadsheetIdOverride);
-  const { sheets } = await getGoogleClients();
+  const { sheets, auth } = await getGoogleClients(clerkUserId);
+  if (!auth) {
+    return {
+      sheetName,
+      rowNumber: 0,
+      values: [],
+    };
+  }
 
   const response = await sheets.spreadsheets.values.get({
     spreadsheetId: id,
@@ -93,8 +103,9 @@ export async function getRow(
   sheetName: string,
   rowNumber: number,
   spreadsheetIdOverride?: string,
+  clerkUserId?: string,
 ): Promise<SheetRowResult> {
-  if (env.GOOGLE_MOCK_MODE || !isGoogleConfigured()) {
+  if (env.GOOGLE_MOCK_MODE || (!clerkUserId && !isGoogleConfigured())) {
     return {
       sheetName,
       rowNumber,
@@ -104,7 +115,14 @@ export async function getRow(
   }
 
   const id = spreadsheetId(spreadsheetIdOverride);
-  const { sheets } = await getGoogleClients();
+  const { sheets, auth } = await getGoogleClients(clerkUserId);
+  if (!auth) {
+    return {
+      sheetName,
+      rowNumber,
+      values: [],
+    };
+  }
 
   const response = await sheets.spreadsheets.values.get({
     spreadsheetId: id,
@@ -125,10 +143,11 @@ export async function findEmail(
   rowNumber?: number,
   columnName?: string,
   spreadsheetIdOverride?: string,
+  clerkUserId?: string,
 ): Promise<{ email: string; sheetName: string; rowNumber: number }> {
   const row = rowNumber
-    ? await getRow(sheetName, rowNumber, spreadsheetIdOverride)
-    : await getLastRow(sheetName, spreadsheetIdOverride);
+    ? await getRow(sheetName, rowNumber, spreadsheetIdOverride, clerkUserId)
+    : await getLastRow(sheetName, spreadsheetIdOverride, clerkUserId);
 
   if (columnName) {
     // Placeholder: real impl would map column header → index

@@ -5,6 +5,7 @@ faster-whisper>=1.0.0      # STT engine (no PyTorch – much lighter than openai
 sounddevice>=0.4.6         # microphone audio capture
 numpy>=1.24.0              # audio array processing
 customtkinter>=5.2.0       # overlay UI
+PyQt6>=6.6.0               # tray/overlay Qt UI
 Pillow>=10.0.0             # tray icon drawing
 pynput>=1.7.6              # global hotkeys (no admin/root required)
 pystray>=0.17.0            # system tray icon

@@ -1,5 +1,7 @@
 import { google } from "googleapis";
 import { env } from "./env.js";
+import { supabaseAdmin } from "./supabase.js";
+import { decryptSecret, encryptSecret } from "../utils/crypto.js";
 
 const SCOPES = [
   "https://www.googleapis.com/auth/spreadsheets",
@@ -14,7 +16,7 @@ export type GoogleClients = {
   sheets: ReturnType<typeof google.sheets>;
   gmail: ReturnType<typeof google.gmail>;
   calendar: ReturnType<typeof google.calendar>;
-  auth: InstanceType<typeof google.auth.JWT> | null;
+  auth: unknown;
 };
 
 let cachedClients: GoogleClients | null = null;
@@ -46,7 +48,72 @@ export function isGoogleConfigured(): boolean {
   );
 }
 
-export async function getGoogleClients(): Promise<GoogleClients> {
+async function buildUserOAuthClient(clerkUserId: string) {
+  if (!env.GOOGLE_OAUTH_CLIENT_ID || !env.GOOGLE_OAUTH_CLIENT_SECRET) return null;
+
+  const { data: connection, error: connectionError } = await supabaseAdmin
+    .from("google_connections")
+    .select("id")
+    .eq("clerk_user_id", clerkUserId)
+    .is("revoked_at", null)
+    .order("connected_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (connectionError) throw connectionError;
+  if (!connection?.id) return null;
+
+  const { data: token, error: tokenError } = await supabaseAdmin
+    .from("google_tokens")
+    .select("access_token_enc, refresh_token_enc, expires_at")
+    .eq("connection_id", connection.id)
+    .maybeSingle();
+
+  if (tokenError) throw tokenError;
+  if (!token?.access_token_enc) return null;
+
+  const oauth2 = new google.auth.OAuth2(
+    env.GOOGLE_OAUTH_CLIENT_ID,
+    env.GOOGLE_OAUTH_CLIENT_SECRET,
+    env.GOOGLE_OAUTH_REDIRECT_URI,
+  );
+
+  oauth2.setCredentials({
+    access_token: decryptSecret(token.access_token_enc),
+    refresh_token: token.refresh_token_enc ? decryptSecret(token.refresh_token_enc) : undefined,
+    expiry_date: token.expires_at ? new Date(token.expires_at).getTime() : undefined,
+  });
+
+  oauth2.on("tokens", async (tokens) => {
+    const update: Record<string, string | null> = {};
+    if (tokens.access_token) update.access_token_enc = encryptSecret(tokens.access_token);
+    if (tokens.refresh_token) update.refresh_token_enc = encryptSecret(tokens.refresh_token);
+    if (tokens.expiry_date) update.expires_at = new Date(tokens.expiry_date).toISOString();
+    if (Object.keys(update).length === 0) return;
+
+    const { error } = await supabaseAdmin
+      .from("google_tokens")
+      .update(update)
+      .eq("connection_id", connection.id);
+    if (error) console.error("[Google] Failed to persist refreshed token", error);
+  });
+
+  return oauth2;
+}
+
+export async function getGoogleClients(clerkUserId?: string): Promise<GoogleClients> {
+  if (clerkUserId) {
+    const userAuth = await buildUserOAuthClient(clerkUserId);
+    if (userAuth) {
+      return {
+        sheets: google.sheets({ version: "v4", auth: userAuth }),
+        gmail: google.gmail({ version: "v1", auth: userAuth }),
+        calendar: google.calendar({ version: "v3", auth: userAuth }),
+        auth: userAuth,
+      };
+    }
+  }
+
   if (cachedClients) {
     return cachedClients;
   }
