@@ -9,8 +9,47 @@
   <img src="https://img.shields.io/badge/Clerk-Auth-4f46e5?style=for-the-badge" alt="Clerk" />
 </p>
 
+
+<p align="center">
+<img width="900" height="870" alt="image" src="https://github.com/user-attachments/assets/1576a990-6365-47a2-9373-52faeb018990" />
+</p>
+
 Clawvio is an operating system powered by conversation.  
 It captures intent from voice or text, executes actions across connected apps, and continuously grows a reusable personal/team knowledge base from run history.
+
+<table>
+<tr>
+<td align="center" width="33%">
+
+https://github.com/user-attachments/assets/d2b9e033-b714-431e-a1ed-4fe9cbb6333a
+
+### Clawvio captures context, not just notes.
+
+From client calls to internal standups, Clawvio turns raw conversation into clear, usable context.
+
+</td>
+
+<td align="center" width="33%">
+
+https://github.com/user-attachments/assets/9a70e9aa-8092-4c88-aaa1-595b338c360c
+
+### Every conversation becomes clear next steps.
+
+Clawvio extracts owners, deadlines, and priorities so your team always knows what to do next.
+
+</td>
+
+<td align="center" width="33%">
+
+https://github.com/user-attachments/assets/4095f4e0-e550-4707-b2d7-1c8942711866
+
+### Move from insights to execution faster.
+
+Clawvio connects ideas to real workflows so decisions turn into shipped outcomes, not forgotten threads.
+
+</td>
+</tr>
+</table>
 
 ## What It Does
 
