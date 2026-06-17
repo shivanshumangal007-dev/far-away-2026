@@ -1,12 +1,11 @@
 /* eslint-disable react/no-unescaped-entities, @typescript-eslint/no-explicit-any, @next/next/no-img-element */
 import { motion } from "framer-motion";
 import { Star, Play } from "lucide-react";
-import Link from "next/link";
 
 const IntroHeader = () => {
   const downloadUrl =
     process.env.NEXT_PUBLIC_WINDOWS_DOWNLOAD_URL ??
-    "https://downloads.clawvio.ai/windows/ClawvioSetup-latest.exe";
+    "https://drive.google.com/file/d/1BcaIjx_D0GwYCAapa8QqiVdGHrqKqItD/view?usp=sharing";
 
   return (
     <div className="w-full flex flex-col items-center text-center pt-10 pb-12">
@@ -72,11 +71,11 @@ const IntroHeader = () => {
           rel="noreferrer"
           className="bg-[#EBE9E4] text-brand-dark text-sm font-medium px-6 py-3.5 rounded-full hover:bg-[#E0DED9] transition-all hover:scale-105 active:scale-95 duration-300 flex items-center gap-2 group"
         >
-          How we work
+          Demo video
           <span className="bg-brand-dark text-white rounded-full p-0.5 group-hover:bg-black transition-colors">
             <Play size={10} fill="currentColor" className="ml-0.5" />
           </span>
-        </Link>
+        </a>
       </motion.div>
     </div>
   );
