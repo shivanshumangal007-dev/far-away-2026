@@ -48,7 +48,11 @@ async fn connect_to_deepgram(api_key: &str, sample_rate: u32, channels: u16) -> 
     futures_util::stream::SplitSink<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, Message>,
     futures_util::stream::SplitStream<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>>
 ), String> {
-    let url = format!("wss://api.deepgram.com/v1/listen?model=nova-2&encoding=linear16&sample_rate={}&channels={}", sample_rate, channels);
+    // Added punctuate, smart_format, and a 3-second endpointing (3000ms) to group sentences better and improve accuracy
+    let url = format!(
+        "wss://api.deepgram.com/v1/listen?model=nova-2&encoding=linear16&sample_rate={}&channels={}&punctuate=true&smart_format=true&endpointing=3000",
+        sample_rate, channels
+    );
     let mut request = url.into_client_request().map_err(|e| format!("Bad URL: {}", e))?;
     request.headers_mut().insert(
         "Authorization",
@@ -286,24 +290,37 @@ fn stop_recording(state: State<'_, AppAudioState>, transcript: Vec<FrontendMessa
         let _ = tx.send(());
     }
     
-    // Dump transcript to local file
-    let current_dir = env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let file_path = current_dir.join("calvio_transcript.json");
-    
-    // We can format the transcript however we want, let's map it to JSON
-    let json_data: Vec<serde_json::Value> = transcript.into_iter().map(|msg| {
-        serde_json::json!({
-            "speaker": msg.speaker,
-            "text": msg.text,
-        })
-    }).collect();
+    // Add a layer to convert to a single string, combining consecutive speakers
+    let mut combined_transcript = String::new();
+    let mut current_speaker = String::new();
+    let mut current_text = String::new();
 
-    if let Ok(json_str) = serde_json::to_string_pretty(&json_data) {
-        if let Err(e) = std::fs::write(&file_path, json_str) {
-            println!("Failed to write transcript to file: {}", e);
+    for msg in transcript {
+        if msg.speaker != current_speaker {
+            // Push previous speaker's message
+            if !current_speaker.is_empty() {
+                combined_transcript.push_str(&format!("{}: '{}' ", current_speaker, current_text.trim()));
+            }
+            current_speaker = msg.speaker;
+            current_text = msg.text;
         } else {
-            println!("Saved transcript to {}", file_path.display());
+            // Same speaker, append text
+            current_text.push_str(" ");
+            current_text.push_str(&msg.text);
         }
+    }
+    // Push the last one
+    if !current_speaker.is_empty() {
+        combined_transcript.push_str(&format!("{}: '{}'", current_speaker, current_text.trim()));
+    }
+
+    let current_dir = env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let file_path = current_dir.join("calvio_transcript.txt");
+    
+    if let Err(e) = std::fs::write(&file_path, &combined_transcript) {
+        println!("Failed to write transcript string to file: {}", e);
+    } else {
+        println!("Saved transcript string to {}", file_path.display());
     }
     
     Ok(())
