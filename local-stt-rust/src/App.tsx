@@ -1,27 +1,39 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { AnimatePresence, motion } from "framer-motion";
+import { invoke } from "@tauri-apps/api/core";
 import { ReadyScreen } from "./components/ReadyScreen";
-import { RecordingScreen } from "./components/RecordingScreen";
+import { RecordingScreen, globalMessages } from "./components/RecordingScreen";
 import { ProcessingScreen } from "./components/ProcessingScreen";
 
 export type AppState = "ready" | "recording" | "processing";
 
 function App() {
   const [appState, setAppState] = useState<AppState>("ready");
+  const stateRef = useRef<AppState>("ready");
+  stateRef.current = appState;
 
   useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
+    const handleKeyDown = async (e: KeyboardEvent) => {
       // Simulate Global Shortcut: Cmd/Ctrl + Shift + E
       const isCmdOrCtrl = e.metaKey || e.ctrlKey;
       if (isCmdOrCtrl && e.shiftKey && e.key.toLowerCase() === "e") {
         e.preventDefault();
         
-        setAppState((current) => {
-          if (current === "ready") return "recording";
-          if (current === "recording") return "processing";
-          // If processing, don't interrupt
-          return current;
-        });
+        if (stateRef.current === "ready") {
+          setAppState("recording");
+          invoke("start_recording").catch(console.error);
+        } else if (stateRef.current === "recording") {
+          setAppState("processing");
+          
+          // Stop recording on backend
+          // We pass a copy of globalMessages to avoid mutations before serialization
+          invoke("stop_recording", { transcript: [...globalMessages] })
+            .then(() => {
+              // Clear global messages for next recording after successful send
+              globalMessages.length = 0;
+            })
+            .catch(console.error);
+        }
       }
     };
 
